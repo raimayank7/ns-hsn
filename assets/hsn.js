@@ -1,8 +1,9 @@
 /* hsn.niveshsahayak.in: HSN/SAC code finder and checker.
-   Finds the HS chapter (goods) or SAC heading (services) for a code or English words, checks how many digits a code
-   needs on a tax invoice (Notification 78/2020-Central Tax, from 1 April 2021), checks the HSN and GST % of the saved items,
-   and sends the user to the official GST portal HSN search for the exact rate. We print no item-wise rates: they live in
-   CBIC rate notifications that keep changing (GST 2.0 from 22 Sept 2025, amended again in 2026). */
+   Searches every code of the GST portal's HSN directory (/data/hsn.json, built by scripts/hsn_data.py), checks how many
+   digits a code needs on a tax invoice (Notification 78/2020-Central Tax, from 1 April 2021), and shows the GST rate
+   entries for a goods code word for word from the CBIC notifications (/data/rates.json: 9/2025, 10/2025, 14/2025-CT(Rate)
+   with their amendments). A rate is never guessed: one rate only when every entry for the code gives the same rate,
+   otherwise the user picks the entry whose description fits. Service rates (11/2017-CT(Rate)) are not in the data yet. */
 (function () {
   'use strict';
   var NS = window.NS, $ = NS.$, $$ = NS.$$, esc = NS.esc, t = function (k, v) { return NS.t(k, v); };
@@ -106,7 +107,108 @@
   NS.hsnCheck = check;
 
   function words(s) { return String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(function (w) { return w.length > 1; }); }
-  /* finder: by code prefix or English words over chapter titles and SAC headings */
+
+  /* official data, loaded once when first needed */
+  var DATA = null, dataP = null;
+  function loadData() {
+    if (!dataP) {
+      var get = function (u) { return fetch(u).then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); }); };
+      var v = (window.NS_CFG && NS_CFG.data) || {};
+      dataP = Promise.all([get(v['hsn.json'] || '/data/hsn.json'), get(v['rates.json'] || '/data/rates.json')]).then(function (a) {
+        var h = a[0], r = a[1], desc = {};
+        h.goods.forEach(function (x) { desc[x[0]] = x[1]; });
+        h.sac.forEach(function (x) { desc[x[0]] = x[1]; });
+        r.entries.forEach(function (e) { e._w = words(e.d); });
+        DATA = { h: h, r: r, desc: desc, all: h.goods.concat(h.sac.map(function (x) { return [x[0], x[1], 1]; })) };
+        DATA.all.forEach(function (x) { x._w = words(x[1]); });
+        return DATA;
+      });
+      dataP.catch(function () { dataP = null; });
+    }
+    return dataP;
+  }
+  NS.hsnData = loadData;
+
+  /* rate entries for a goods code: kind 'all' = the entry covers the whole code, 'part' = only some codes under it */
+  function rateMatch(code) {
+    var out = [];
+    if (!DATA || !code || code.slice(0, 2) === '99') return out;
+    DATA.r.entries.forEach(function (e) {
+      var kind = null, spec = 0;
+      e.i.forEach(function (tk) {
+        if (code.indexOf(tk) === 0) { kind = 'all'; spec = Math.max(spec, tk.length); }
+        else if (kind !== 'all' && tk.indexOf(code) === 0) { kind = 'part'; spec = Math.max(spec, code.length); }
+      });
+      if (!kind) return;
+      if (e.x && e.x.some(function (x) { return code.indexOf(x) === 0; })) return;
+      if (kind === 'all' && e.x && e.x.some(function (x) { return x.indexOf(code) === 0; })) kind = 'part';
+      out.push({ e: e, kind: kind, spec: spec });
+    });
+    /* whole-code entries first, the most specific code first, then by rate */
+    return out.sort(function (a, b) { return (a.kind === 'all' ? 0 : 1) - (b.kind === 'all' ? 0 : 1) || b.spec - a.spec || a.e.g - b.e.g; });
+  }
+  /* the one rate for a code, or null when the user has to choose */
+  function oneRate(m) {
+    if (!m.length || m.some(function (x) { return x.kind !== 'all'; })) return null;
+    var g = m[0].e.g;
+    return m.every(function (x) { return x.e.g === g; }) ? g : null;
+  }
+  function rates(m) { var s = []; m.forEach(function (x) { if (s.indexOf(x.e.g) < 0) s.push(x.e.g); }); return s.sort(function (a, b) { return a - b; }); }
+  NS.hsnRate = function (code) { var m = rateMatch(String(code || '').replace(/\D/g, '')); return { one: oneRate(m), all: rates(m), entries: m }; };
+
+  function scoreWords(ws, tw) {
+    return ws.filter(function (w) { return tw.some(function (x) { return x.indexOf(w) === 0 || (w.length > 4 && x.indexOf(w.slice(0, -1)) === 0); }); }).length;
+  }
+  /* full search over the official list (codes) and the rate entries (words only) */
+  function findAll(q) {
+    var digits = q.replace(/\s/g, ''), res = { codes: [], rates: [], more: 0 };
+    if (/^[0-9]+$/.test(digits)) {
+      DATA.all.forEach(function (x) { if (x[0].indexOf(digits) === 0) res.codes.push(x); });
+      res.codes.sort(function (a, b) { return a[0].length - b[0].length || (a[0] < b[0] ? -1 : 1); });
+    } else {
+      var ws = words(q); if (!ws.length) return res;
+      var sc = [];
+      DATA.all.forEach(function (x) { var s = scoreWords(ws, x._w); if (s === ws.length) sc.push([s, x]); });
+      res.codes = sc.map(function (p) { return p[1]; }).sort(function (a, b) { return a[0].length - b[0].length || (a[0] < b[0] ? -1 : 1); });
+      DATA.r.entries.forEach(function (e) { if (scoreWords(ws, e._w) === ws.length) res.rates.push(e); });
+    }
+    res.more = Math.max(0, res.codes.length - 60);
+    res.codes = res.codes.slice(0, 60);
+    res.rates = res.rates.slice(0, 20);
+    return res;
+  }
+  function rateTxt(g) { return g === 0 ? t('hs.r.nil') : g + '%'; }
+  function entryHtml(e, kind) {
+    return '<li class="hs-ent"><span class="hs-rt' + (e.g === 0 ? ' nil' : '') + '">' + esc(rateTxt(e.g)) + '</span><div>' +
+      '<p dir="ltr" lang="en">' + esc(e.d) + '</p>' +
+      '<small dir="ltr" lang="en">' + esc(e.n) + ', S. No. ' + esc(e.s) + ' · ' + esc(e.c) + '</small>' +
+      (kind === 'part' ? ' <small class="hs-part">' + esc(t('hs.r.part')) + '</small>' : '') +
+      (e.chg ? ' <small class="hs-chg">' + esc(t('hs.r.chg', { n: e.chg })) + '</small>' : '') +
+      (e.list ? '<details><summary>' + esc(t('hs.r.list', { n: e.list.length })) + '</summary><ol dir="ltr" lang="en">' + e.list.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ol></details>' : '') +
+      '</div></li>';
+  }
+  function ratePanel(c, sac) {
+    if (!DATA) return '<div class="shim" style="height:60px"></div>';
+    var h = '<h3 class="hs-sub">' + esc(t('hs.r.h')) + '</h3>';
+    if (sac) return h + '<p class="note">' + esc(t('hs.r.svc')) + '</p>';
+    var m = rateMatch(c), one = oneRate(m);
+    if (!m.length) h += '<p class="note">' + esc(t('hs.r.none')) + '</p>';
+    else {
+      h += one != null ? '<p class="gt-badge ok">' + esc(t('hs.r.one', { r: rateTxt(one) })) + '</p><p class="soft">' + esc(t('hs.r.fit')) + '</p>'
+        : '<p class="gt-badge warn">' + esc(t('hs.r.many')) + '</p>';
+      h += '<ul class="hs-ents">' + m.map(function (x) { return entryHtml(x.e, x.kind); }).join('') + '</ul>';
+    }
+    return h + '<p class="soft hs-src">' + esc(t('hs.r.src', { d: NS.fmtDate(DATA.r.checked) })) + '</p>';
+  }
+  function officialHtml(c, sac) {
+    if (!DATA) return '';
+    var d = DATA.desc[c];
+    if (d) return '<tr><th scope="row">' + esc(t('hs.d.off')) + '</th><td><span dir="ltr" lang="en">' + esc(d) + '</span></td></tr>';
+    var under = DATA.all.filter(function (x) { return x[0].length > c.length && x[0].indexOf(c) === 0; }).length;
+    return '<tr><th scope="row">' + esc(t('hs.d.off')) + '</th><td>' + esc(under ? t('hs.d.sub', { n: under }) : t('hs.d.notin')) + '</td></tr>';
+  }
+
+  /* finder before the data has loaded: chapter titles and SAC headings */
   function find(q) {
     q = String(q || '').trim();
     if (!q) return [];
@@ -145,19 +247,34 @@
         : '<tr><th scope="row">' + esc(t('hs.p.kind')) + '</th><td>' + esc(t('hs.k.hsn')) + '</td></tr>' +
           '<tr><th scope="row">' + esc(t('hs.p.sec')) + '</th><td><b class="mono">' + esc(r.sec[0]) + '</b> · <span dir="ltr">' + esc(r.sec[3]) + '</span></td></tr>' +
           '<tr><th scope="row">' + esc(t('hs.p.ch')) + '</th><td><b class="mono">' + esc(pad(r.ch)) + '</b> · <span dir="ltr">' + esc(r.title) + '</span></td></tr>') +
+        officialHtml(r.c, r.sac) +
         '<tr><th scope="row">' + esc(t('hs.p.need')) + '</th><td>' + esc(t(band() === 'gt5' ? 'hs.need.gt5' : 'hs.need.le5')) + '</td></tr></table>';
-      h += '<p class="note">' + esc(t('hs.rate')) + '</p>' + portalBtns(r.c);
+      h += ratePanel(r.c, r.sac) + portalBtns(r.c);
     }
     out.innerHTML = h;
   }
 
   function showFind() {
-    var q = $('#hs-q', root).value, out = $('[data-hs-found]', root), res = find(q);
+    var q = $('#hs-q', root).value, out = $('[data-hs-found]', root);
     if (!q.trim()) { out.innerHTML = ''; return; }
-    if (!res.length) { out.innerHTML = '<p class="soft">' + esc(t('hs.f.none')) + '</p>' + portalBtns(''); return; }
-    out.innerHTML = '<ul class="hs-list">' + res.map(function (x) {
-      return '<li><button type="button" class="hs-pick" data-code="' + esc(x.code) + '"><b class="mono">' + esc(x.code) + '</b><span dir="ltr">' + esc(x.title) + '</span><small>' + esc(t(x.sac ? 'hs.k.sac' : 'hs.k.ch')) + '</small></button></li>';
-    }).join('') + '</ul><p class="soft">' + esc(t('hs.f.next')) + '</p>';
+    if (!DATA) {
+      var res = find(q);
+      out.innerHTML = '<p class="soft">' + esc(t('hs.d.load')) + '</p>' + (res.length ? '<ul class="hs-list">' + res.map(function (x) {
+        return '<li><button type="button" class="hs-pick" data-code="' + esc(x.code) + '"><b class="mono">' + esc(x.code) + '</b><span dir="ltr">' + esc(x.title) + '</span><small>' + esc(t(x.sac ? 'hs.k.sac' : 'hs.k.ch')) + '</small></button></li>';
+      }).join('') + '</ul>' : '');
+      return;
+    }
+    var f = findAll(q);
+    if (!f.codes.length && !f.rates.length) { out.innerHTML = '<p class="soft">' + esc(t('hs.f.none')) + '</p>' + portalBtns(''); return; }
+    var h = '';
+    if (f.codes.length) h += '<h3 class="hs-sub">' + esc(t('hs.f.codes')) + '</h3><ul class="hs-list">' + f.codes.map(function (x) {
+      var kind = x[2] ? 'hs.k.sac' : x[0].length === 2 ? 'hs.k.ch' : 'hs.k.hsn';
+      return '<li><button type="button" class="hs-pick" data-code="' + esc(x[0]) + '"><b class="mono">' + esc(x[0]) + '</b><span dir="ltr" lang="en">' + esc(x[1]) + '</span><small>' + esc(t(kind)) + '</small></button></li>';
+    }).join('') + '</ul>' + (f.more ? '<p class="soft">' + esc(t('hs.f.more', { n: 60 })) + '</p>' : '');
+    if (f.rates.length) h += '<h3 class="hs-sub">' + esc(t('hs.f.rates')) + '</h3><ul class="hs-ents">' + f.rates.map(function (e) {
+      return entryHtml(e, 'all').replace('<div>', '<div>' + (e.i.length ? '<button type="button" class="btn sm hs-use" data-code="' + esc(e.i[0]) + '">' + esc(e.i[0]) + '</button> ' : ''));
+    }).join('') + '</ul>';
+    out.innerHTML = h + '<p class="soft">' + esc(t('hs.f.next2')) + '</p>';
   }
 
   /* the saved items and services: HSN digits and GST % */
@@ -171,7 +288,27 @@
       if (it.kind !== 'service' && r.sac) is.push(t('hs.i.goods'));
     }
     if (it.gst !== '' && it.gst != null && RATES.indexOf(NS.num(it.gst)) < 0) is.push(t('hs.i.rate', { r: it.gst }));
+    else if (DATA && hsn && it.gst !== '' && it.gst != null) {
+      var all = rates(rateMatch(hsn));
+      if (all.length && all.indexOf(NS.num(it.gst)) < 0) is.push(t('hs.i.notr', { r: it.gst, list: all.map(rateTxt).join(', ') }));
+    }
     return is;
+  }
+  /* after a code is typed in the items table: fill the GST % when there is one rate, else offer the choices */
+  function rateHelp(i, box) {
+    var hsn = $('.hs-cell[data-i="' + i + '"][data-f="hsn"]', box), gst = $('.hs-cell[data-i="' + i + '"][data-f="gst"]', box), help = $('[data-help="' + i + '"]', box);
+    if (!DATA || !hsn || !help) return;
+    var m = rateMatch(hsn.value.replace(/\D/g, '')), one = oneRate(m);
+    if (!m.length) { help.innerHTML = ''; return; }
+    if (one != null) {
+      var changed = gst.value !== String(one);
+      gst.value = one;
+      help.innerHTML = changed ? '<small class="hs-auto">' + esc(t('hs.i.auto', { r: one })) + '</small>' : '';
+      return;
+    }
+    help.innerHTML = '<select class="hs-choose" aria-label="' + esc(t('hs.i.pick')) + '"><option value="">' + esc(t('hs.i.pick')) + '</option>' +
+      m.map(function (x) { var d = x.e.d.length > 70 ? x.e.d.slice(0, 68) + '…' : x.e.d; return '<option value="' + x.e.g + '">' + esc(rateTxt(x.e.g) + ' · ' + d) + '</option>'; }).join('') + '</select>';
+    $('select', help).onchange = function () { if (this.value !== '') gst.value = this.value; };
   }
   function loadItems() {
     var box = $('[data-hs-items]', root);
@@ -183,9 +320,12 @@
         items.map(function (it, i) {
           var is = itemIssues(it);
           return '<tr class="' + (is.length ? 'bad' : '') + '"><td>' + esc(it.desc) + '</td><td><input class="mono hs-cell" data-i="' + i + '" data-f="hsn" value="' + esc(it.hsn || '') + '" inputmode="numeric" dir="ltr" aria-label="HSN/SAC"></td>' +
-            '<td><input class="mono hs-cell hs-rate" data-i="' + i + '" data-f="gst" value="' + esc(it.gst == null ? '' : it.gst) + '" inputmode="decimal" dir="ltr" aria-label="GST %"></td><td>' + (is.length ? esc(is.join(' · ')) : '✓') + '</td>' +
+            '<td><input class="mono hs-cell hs-rate" data-i="' + i + '" data-f="gst" value="' + esc(it.gst == null ? '' : it.gst) + '" inputmode="decimal" dir="ltr" aria-label="GST %"><div data-help="' + i + '"></div></td><td>' + (is.length ? esc(is.join(' · ')) : '✓') + '</td>' +
             '<td><button type="button" class="btn sm" data-save="' + i + '">' + esc(t('hs.i.save')) + '</button></td></tr>';
         }).join('') + '</tbody></table></div>';
+      $$('.hs-cell[data-f="hsn"]', box).forEach(function (inp) {
+        inp.addEventListener('change', function () { rateHelp(inp.getAttribute('data-i'), box); });
+      });
       $$('[data-save]', box).forEach(function (b) {
         b.onclick = function () {
           var i = +b.getAttribute('data-save'), it = items[i];
@@ -207,7 +347,7 @@
       '<div class="fg2"><label for="hs-band" class="gt-lbl">' + esc(t('hs.band')) + '</label><select id="hs-band"><option value="le5"' + (bd === 'le5' ? ' selected' : '') + '>' + esc(t('hs.b.le5')) + '</option><option value="gt5"' + (bd === 'gt5' ? ' selected' : '') + '>' + esc(t('hs.b.gt5')) + '</option></select>' +
       '<label class="chk"><input type="checkbox" id="hs-b2c"> ' + esc(t('hs.b2c')) + '</label></div>' +
       '<div data-hs-out aria-live="polite"></div></section>' +
-      '<section class="gt-card" aria-labelledby="hs-h2"><h2 id="hs-h2">' + esc(t('hs.h.find')) + '</h2><p class="soft">' + esc(t('hs.f.help')) + '</p>' +
+      '<section class="gt-card" aria-labelledby="hs-h2"><h2 id="hs-h2">' + esc(t('hs.h.find2')) + '</h2><p class="soft">' + esc(t('hs.f.help2')) + '</p>' +
       '<label for="hs-q" class="gt-lbl">' + esc(t('hs.f.lbl')) + '</label><input id="hs-q" type="search" dir="ltr" autocomplete="off" placeholder="cotton, furniture, 61, repair">' +
       '<div data-hs-found aria-live="polite"></div></section>' +
       '</div>' +
@@ -228,6 +368,8 @@
     };
     showCheck(); showFind();
     NSStore.ready().then(loadItems);
+    loadData().then(function () { if (!root) return; showCheck(); showFind(); loadItems(); },
+      function () { var o = $('[data-hs-out]', root); if (o) o.insertAdjacentHTML('beforeend', '<p class="soft">' + esc(t('hs.d.err')) + '</p>'); });
   }
 
   function start() { root = $('#hsn-tool'); if (root) render(); }
