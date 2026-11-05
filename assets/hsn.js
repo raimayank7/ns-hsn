@@ -4,7 +4,9 @@
    entries for a goods code word for word from the CBIC notifications (/data/rates.json: 9/2025, 10/2025, 14/2025-CT(Rate)
    with their amendments). A rate is never guessed: one rate only when every entry for the code gives the same rate,
    otherwise the user picks the entry whose description fits. Service rates: the Table of 11/2017-CT(Rate) as amended
-   (rates.json svc, built by scripts/hsn_src/svc/svc_build.py), matched by SAC heading; exemptions (12/2017) are not in it. */
+   (rates.json svc, built by scripts/hsn_src/svc/svc_build.py), matched by SAC heading. Exemptions: the Table of
+   12/2017-CT(Rate) as amended (rates.json exm, built by scripts/hsn_src/exm/ex_build.py), matched by SAC heading; entries
+   written for any service (Chapter 99) are listed apart. With an exemption possible, a service rate is never filled in by itself. */
 (function () {
   'use strict';
   var NS = window.NS, $ = NS.$, $$ = NS.$$, esc = NS.esc, t = function (k, v) { return NS.t(k, v); };
@@ -121,6 +123,12 @@
         h.sac.forEach(function (x) { desc[x[0]] = x[1]; });
         r.entries.forEach(function (e) { e._w = words(e.d); });
         (r.svc || []).forEach(function (e) { e._w = words(e.d + ' ' + e.h); });
+        (r.exm || []).forEach(function (e) { e._w = words(e.d + ' ' + e.h + ' ' + (e.c || '')); });
+        /* the terms paragraph 2 defines, to show the meaning of those used in an entry */
+        r._terms = Object.keys(r.exmDefs || {}).map(function (k) {
+          var m = /^\([a-z]+\)\s?[“‘"']([^”’"']+)[”’"']/.exec(r.exmDefs[k]);
+          return m ? { k: k, re: new RegExp('\\b' + m[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i') } : null;
+        }).filter(Boolean);
         DATA = { h: h, r: r, desc: desc, all: h.goods.concat(h.sac.map(function (x) { return [x[0], x[1], 1]; })) };
         DATA.all.forEach(function (x) { x._w = words(x[1]); });
         return DATA;
@@ -157,6 +165,11 @@
     var h = String(code).slice(0, 4);
     return (DATA && DATA.r.svc || []).filter(function (e) { return !e.a && e.k.indexOf(h) >= 0; });
   }
+  /* exemption entries (12/2017) whose heading names this SAC heading; any = entries written for any service */
+  function exmMatch(code, any) {
+    var h = String(code).slice(0, 4);
+    return (DATA && DATA.r.exm || []).filter(function (e) { return any ? e.a && !e.k.length : e.k.indexOf(h) >= 0; });
+  }
   /* the one rate for a code, or null when the user has to choose */
   function oneRate(m) {
     if (!m.length || m.some(function (x) { return x.kind !== 'all'; })) return null;
@@ -171,7 +184,7 @@
   }
   /* full search over the official list (codes) and the rate entries (words only) */
   function findAll(q) {
-    var digits = q.replace(/\s/g, ''), res = { codes: [], rates: [], svc: [], more: 0 };
+    var digits = q.replace(/\s/g, ''), res = { codes: [], rates: [], svc: [], exm: [], more: 0 };
     if (/^[0-9]+$/.test(digits)) {
       DATA.all.forEach(function (x) { if (x[0].indexOf(digits) === 0) res.codes.push(x); });
       res.codes.sort(function (a, b) { return a[0].length - b[0].length || (a[0] < b[0] ? -1 : 1); });
@@ -182,11 +195,13 @@
       res.codes = sc.map(function (p) { return p[1]; }).sort(function (a, b) { return a[0].length - b[0].length || (a[0] < b[0] ? -1 : 1); });
       DATA.r.entries.forEach(function (e) { if (scoreWords(ws, e._w) === ws.length) res.rates.push(e); });
       DATA.r.svc.forEach(function (e) { if (scoreWords(ws, e._w) === ws.length) res.svc.push(e); });
+      (DATA.r.exm || []).forEach(function (e) { if (scoreWords(ws, e._w) === ws.length) res.exm.push(e); });
     }
     res.more = Math.max(0, res.codes.length - 60);
     res.codes = res.codes.slice(0, 60);
     res.rates = res.rates.slice(0, 20);
     res.svc = res.svc.slice(0, 12);
+    res.exm = res.exm.slice(0, 12);
     return res;
   }
   function rateTxt(g) { return g == null ? t('hs.s.same') : g === 0 ? t('hs.r.nil') : g + '%'; }
@@ -204,6 +219,30 @@
       (iv ? '<details><summary>' + esc(t('hs.s.iv')) + '</summary><p dir="ltr" lang="en">' + esc(DATA.r.svcDefs.iv) + '</p></details>' : '') +
       '</div></li>';
   }
+  /* one entry of the exemption Table, word for word, with the meaning of the defined words it uses */
+  function exmHtml(e, btn) {
+    var txt = e.d + ' ' + (e.c || ''), defs = DATA.r._terms.filter(function (x) { return x.re.test(txt); });
+    (txt.match(/clause \((z{0,2}[a-z]+)\) in para 2/g) || []).forEach(function (m) {   /* "[Please refer to clause (zfb) in para 2]" */
+      var k = /\((\w+)\)/.exec(m)[1];
+      if (DATA.r.exmDefs[k] && !defs.some(function (x) { return x.k === k; })) defs.push({ k: k });
+    });
+    return '<li class="hs-ent"><span class="hs-rt nil">' + esc(t('hs.x.nil')) + '</span><div>' +
+      (btn && e.k[0] ? '<button type="button" class="btn sm hs-use" data-code="' + esc(e.k[0]) + '">' + esc(e.k[0]) + '</button> ' : '') +
+      '<p dir="ltr" lang="en">' + esc(e.d) + '</p>' +
+      (e.c ? '<p class="hs-cond"><b>' + esc(t('hs.x.cond')) + ':</b> <span dir="ltr" lang="en">' + esc(e.c) + '</span></p>' : '') +
+      '<small dir="ltr" lang="en">12/2017-CT(Rate), S. No. ' + esc(e.s) + ' · ' + esc(e.h) + '</small>' +
+      (e.chg ? ' <small class="hs-chg">' + esc(t('hs.r.chg', { n: e.chg[e.chg.length - 1] })) + '</small>' : '') +
+      (defs.length ? '<details><summary>' + esc(t('hs.x.defs')) + '</summary><ul dir="ltr" lang="en">' + defs.map(function (x) { return '<li>' + esc(DATA.r.exmDefs[x.k]) + '</li>'; }).join('') + '</ul></details>' : '') +
+      '</div></li>';
+  }
+  function exmPanel(c) {
+    var ex = exmMatch(c), any = exmMatch(c, true);
+    var h = '<h3 class="hs-sub">' + esc(t('hs.x.h')) + '</h3><p class="soft">' + esc(t('hs.x.lead')) + '</p>';
+    h += ex.length ? '<ul class="hs-ents">' + ex.map(function (e) { return exmHtml(e); }).join('') + '</ul>' : '<p class="note">' + esc(t('hs.x.none')) + '</p>';
+    h += '<details class="hs-any"><summary>' + esc(t('hs.x.any', { n: any.length })) + '</summary><ul class="hs-ents">' + any.map(function (e) { return exmHtml(e); }).join('') + '</ul></details>';
+    h += '<details><summary>' + esc(t('hs.x.expl')) + '</summary><ul dir="ltr" lang="en">' + DATA.r.exmExpl.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul></details>';
+    return h + '<p class="soft">' + esc(t('hs.x.ind')) + '</p><p class="soft hs-src">' + esc(t('hs.x.src', { d: NS.fmtDate(DATA.r.checked) })) + '</p>';
+  }
   function entryHtml(e, kind) {
     return '<li class="hs-ent"><span class="hs-rt' + (e.g === 0 ? ' nil' : '') + '">' + esc(rateTxt(e.g)) + '</span><div>' +
       '<p dir="ltr" lang="en">' + esc(e.d) + '</p>' +
@@ -217,14 +256,15 @@
     if (!DATA) return '<div class="shim" style="height:60px"></div>';
     var h = '<h3 class="hs-sub">' + esc(t('hs.r.h')) + '</h3>';
     if (sac) {
-      var sm = svcMatch(c), flat = rateMatch(c), sone = oneRate(flat);
+      var sm = svcMatch(c), flat = rateMatch(c), sone = oneRate(flat), exm = exmMatch(c).length;
       if (!sm.length) h += '<p class="note">' + esc(t('hs.s.none')) + '</p>';
       else {
-        h += sone != null ? '<p class="gt-badge ok">' + esc(t('hs.r.one', { r: rateTxt(sone) })) + '</p><p class="soft">' + esc(t('hs.r.fit')) + '</p>'
+        h += sone != null && !exm ? '<p class="gt-badge ok">' + esc(t('hs.r.one', { r: rateTxt(sone) })) + '</p><p class="soft">' + esc(t('hs.r.fit')) + '</p>'
+          : sone != null ? '<p class="gt-badge warn">' + esc(t('hs.x.maybe', { r: rateTxt(sone) })) + '</p>'
           : '<p class="gt-badge warn">' + esc(t('hs.s.many')) + '</p>';
         h += '<ul class="hs-ents">' + sm.map(function (e) { return svcHtml(e); }).join('') + '</ul>';
       }
-      return h + '<p class="note">' + esc(t('hs.s.ex')) + '</p><p class="soft hs-src">' + esc(t('hs.s.src', { d: NS.fmtDate(DATA.r.checked) })) + '</p>';
+      return h + '<p class="soft hs-src">' + esc(t('hs.s.src', { d: NS.fmtDate(DATA.r.checked) })) + '</p>' + exmPanel(c);
     }
     var m = rateMatch(c), one = oneRate(m);
     if (!m.length) h += '<p class="note">' + esc(t('hs.r.none')) + '</p>';
@@ -300,7 +340,7 @@
       return;
     }
     var f = findAll(q);
-    if (!f.codes.length && !f.rates.length && !f.svc.length) { out.innerHTML = '<p class="soft">' + esc(t('hs.f.none')) + '</p>' + portalBtns(''); return; }
+    if (!f.codes.length && !f.rates.length && !f.svc.length && !f.exm.length) { out.innerHTML = '<p class="soft">' + esc(t('hs.f.none')) + '</p>' + portalBtns(''); return; }
     var h = '';
     if (f.codes.length) h += '<h3 class="hs-sub">' + esc(t('hs.f.codes')) + '</h3><ul class="hs-list">' + f.codes.map(function (x) {
       var kind = x[2] ? 'hs.k.sac' : x[0].length === 2 ? 'hs.k.ch' : 'hs.k.hsn';
@@ -310,6 +350,7 @@
       return entryHtml(e, 'all').replace('<div>', '<div>' + (e.i.length ? '<button type="button" class="btn sm hs-use" data-code="' + esc(e.i[0]) + '">' + esc(e.i[0]) + '</button> ' : ''));
     }).join('') + '</ul>';
     if (f.svc.length) h += '<h3 class="hs-sub">' + esc(t('hs.s.found')) + '</h3><ul class="hs-ents">' + f.svc.map(function (e) { return svcHtml(e, true); }).join('') + '</ul>';
+    if (f.exm.length) h += '<h3 class="hs-sub">' + esc(t('hs.x.found')) + '</h3><ul class="hs-ents">' + f.exm.map(function (e) { return exmHtml(e, true); }).join('') + '</ul>';
     out.innerHTML = h + '<p class="soft">' + esc(t('hs.f.next2')) + '</p>';
   }
 
@@ -326,6 +367,7 @@
     if (it.gst !== '' && it.gst != null && RATES.indexOf(NS.num(it.gst)) < 0) is.push(t('hs.i.rate', { r: it.gst }));
     else if (DATA && hsn && it.gst !== '' && it.gst != null) {
       var all = rates(rateMatch(hsn));
+      if (all.length && exmMatch(hsn).length && all.indexOf(0) < 0) all.unshift(0);   /* an exempt supply is nil */
       if (all.length && all.indexOf(NS.num(it.gst)) < 0) is.push(t('hs.i.notr', { r: it.gst, list: all.map(rateTxt).join(', ') }));
     }
     return is;
@@ -334,16 +376,18 @@
   function rateHelp(i, box) {
     var hsn = $('.hs-cell[data-i="' + i + '"][data-f="hsn"]', box), gst = $('.hs-cell[data-i="' + i + '"][data-f="gst"]', box), help = $('[data-help="' + i + '"]', box);
     if (!DATA || !hsn || !help) return;
-    var m = rateMatch(hsn.value.replace(/\D/g, '')), one = oneRate(m);
+    var code = hsn.value.replace(/\D/g, ''), m = rateMatch(code), one = oneRate(m);
     if (!m.length) { help.innerHTML = ''; return; }
-    if (one != null) {
+    var ex = code.slice(0, 2) === '99' ? exmMatch(code) : [];
+    if (one != null && !ex.length) {
       var changed = gst.value !== String(one);
       gst.value = one;
       help.innerHTML = changed ? '<small class="hs-auto">' + esc(t('hs.i.auto', { r: one })) + '</small>' : '';
       return;
     }
     help.innerHTML = '<select class="hs-choose" aria-label="' + esc(t('hs.i.pick')) + '"><option value="">' + esc(t('hs.i.pick')) + '</option>' +
-      m.filter(function (x) { return x.e.g != null; }).map(function (x) { var d = x.e.d.length > 70 ? x.e.d.slice(0, 68) + '…' : x.e.d; return '<option value="' + x.e.g + '">' + esc(rateTxt(x.e.g) + ' · ' + d) + '</option>'; }).join('') + '</select>';
+      m.filter(function (x) { return x.e.g != null; }).map(function (x) { var d = x.e.d.length > 70 ? x.e.d.slice(0, 68) + '…' : x.e.d; return '<option value="' + x.e.g + '">' + esc(rateTxt(x.e.g) + ' · ' + d) + '</option>'; }).join('') +
+      ex.map(function (e) { var d = e.d.length > 60 ? e.d.slice(0, 58) + '…' : e.d; return '<option value="0">' + esc(t('hs.x.nil') + ' (12/2017, S. No. ' + e.s + ') · ' + d) + '</option>'; }).join('') + '</select>';
     $('select', help).onchange = function () { if (this.value !== '') gst.value = this.value; };
   }
   function loadItems() {
