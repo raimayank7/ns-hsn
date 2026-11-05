@@ -3,7 +3,8 @@
    digits a code needs on a tax invoice (Notification 78/2020-Central Tax, from 1 April 2021), and shows the GST rate
    entries for a goods code word for word from the CBIC notifications (/data/rates.json: 9/2025, 10/2025, 14/2025-CT(Rate)
    with their amendments). A rate is never guessed: one rate only when every entry for the code gives the same rate,
-   otherwise the user picks the entry whose description fits. Service rates (11/2017-CT(Rate)) are not in the data yet. */
+   otherwise the user picks the entry whose description fits. Service rates: the Table of 11/2017-CT(Rate) as amended
+   (rates.json svc, built by scripts/hsn_src/svc/svc_build.py), matched by SAC heading; exemptions (12/2017) are not in it. */
 (function () {
   'use strict';
   var NS = window.NS, $ = NS.$, $$ = NS.$$, esc = NS.esc, t = function (k, v) { return NS.t(k, v); };
@@ -119,6 +120,7 @@
         h.goods.forEach(function (x) { desc[x[0]] = x[1]; });
         h.sac.forEach(function (x) { desc[x[0]] = x[1]; });
         r.entries.forEach(function (e) { e._w = words(e.d); });
+        (r.svc || []).forEach(function (e) { e._w = words(e.d + ' ' + e.h); });
         DATA = { h: h, r: r, desc: desc, all: h.goods.concat(h.sac.map(function (x) { return [x[0], x[1], 1]; })) };
         DATA.all.forEach(function (x) { x._w = words(x[1]); });
         return DATA;
@@ -132,7 +134,11 @@
   /* rate entries for a goods code: kind 'all' = the entry covers the whole code, 'part' = only some codes under it */
   function rateMatch(code) {
     var out = [];
-    if (!DATA || !code || code.slice(0, 2) === '99') return out;
+    if (!DATA || !code) return out;
+    if (code.slice(0, 2) === '99') {   /* services: every option of every item under the SAC heading */
+      svcMatch(code).forEach(function (e) { e.o.forEach(function (o) { out.push({ e: { g: o.g, d: e.d }, kind: 'all', svc: 1 }); }); });
+      return out;
+    }
     DATA.r.entries.forEach(function (e) {
       var kind = null, spec = 0;
       e.i.forEach(function (tk) {
@@ -147,13 +153,17 @@
     /* whole-code entries first, the most specific code first, then by rate */
     return out.sort(function (a, b) { return (a.kind === 'all' ? 0 : 1) - (b.kind === 'all' ? 0 : 1) || b.spec - a.spec || a.e.g - b.e.g; });
   }
+  function svcMatch(code) {
+    var h = String(code).slice(0, 4);
+    return (DATA && DATA.r.svc || []).filter(function (e) { return !e.a && e.k.indexOf(h) >= 0; });
+  }
   /* the one rate for a code, or null when the user has to choose */
   function oneRate(m) {
     if (!m.length || m.some(function (x) { return x.kind !== 'all'; })) return null;
     var g = m[0].e.g;
     return m.every(function (x) { return x.e.g === g; }) ? g : null;
   }
-  function rates(m) { var s = []; m.forEach(function (x) { if (s.indexOf(x.e.g) < 0) s.push(x.e.g); }); return s.sort(function (a, b) { return a - b; }); }
+  function rates(m) { var s = []; m.forEach(function (x) { if (x.e.g != null && s.indexOf(x.e.g) < 0) s.push(x.e.g); }); return s.sort(function (a, b) { return a - b; }); }
   NS.hsnRate = function (code) { var m = rateMatch(String(code || '').replace(/\D/g, '')); return { one: oneRate(m), all: rates(m), entries: m }; };
 
   function scoreWords(ws, tw) {
@@ -161,7 +171,7 @@
   }
   /* full search over the official list (codes) and the rate entries (words only) */
   function findAll(q) {
-    var digits = q.replace(/\s/g, ''), res = { codes: [], rates: [], more: 0 };
+    var digits = q.replace(/\s/g, ''), res = { codes: [], rates: [], svc: [], more: 0 };
     if (/^[0-9]+$/.test(digits)) {
       DATA.all.forEach(function (x) { if (x[0].indexOf(digits) === 0) res.codes.push(x); });
       res.codes.sort(function (a, b) { return a[0].length - b[0].length || (a[0] < b[0] ? -1 : 1); });
@@ -171,13 +181,29 @@
       DATA.all.forEach(function (x) { var s = scoreWords(ws, x._w); if (s === ws.length) sc.push([s, x]); });
       res.codes = sc.map(function (p) { return p[1]; }).sort(function (a, b) { return a[0].length - b[0].length || (a[0] < b[0] ? -1 : 1); });
       DATA.r.entries.forEach(function (e) { if (scoreWords(ws, e._w) === ws.length) res.rates.push(e); });
+      DATA.r.svc.forEach(function (e) { if (scoreWords(ws, e._w) === ws.length) res.svc.push(e); });
     }
     res.more = Math.max(0, res.codes.length - 60);
     res.codes = res.codes.slice(0, 60);
     res.rates = res.rates.slice(0, 20);
+    res.svc = res.svc.slice(0, 12);
     return res;
   }
-  function rateTxt(g) { return g === 0 ? t('hs.r.nil') : g + '%'; }
+  function rateTxt(g) { return g == null ? t('hs.s.same') : g === 0 ? t('hs.r.nil') : g + '%'; }
+  /* one item of the services Table: every rate option with its condition, word for word */
+  function svcHtml(e, btn) {
+    var iv = e.o.some(function (o) { return /Explanation [Nn]o\.? ?\(iv\)|clause \(iv\) of paragraph 4/.test(o.c); });
+    return '<li class="hs-ent hs-svc"><div>' + (btn ? '<button type="button" class="btn sm hs-use" data-code="' + esc(e.k[0] || '') + '">' + esc(e.k[0] || '') + '</button> ' : '') +
+      '<p dir="ltr" lang="en">' + esc(e.d) + '</p>' +
+      '<ul class="hs-opts">' + e.o.map(function (o, k) {
+        return '<li>' + (k ? '<span class="hs-or">' + esc(t('hs.s.or')) + '</span>' : '') + '<span class="hs-rt' + (o.g === 0 ? ' nil' : '') + '">' + esc(rateTxt(o.g)) + '</span>' +
+          (o.c && o.c !== '-' ? '<small dir="ltr" lang="en">' + esc(o.c) + '</small>' : '') + '</li>';
+      }).join('') + '</ul>' +
+      '<small dir="ltr" lang="en">11/2017-CT(Rate), S. No. ' + esc(e.s) + (e.id ? ' ' + esc(e.id) : '') + ' · ' + esc(e.h) + '</small>' +
+      (e.chg ? ' <small class="hs-chg">' + esc(t('hs.r.chg', { n: e.chg[e.chg.length - 1] })) + '</small>' : '') +
+      (iv ? '<details><summary>' + esc(t('hs.s.iv')) + '</summary><p dir="ltr" lang="en">' + esc(DATA.r.svcDefs.iv) + '</p></details>' : '') +
+      '</div></li>';
+  }
   function entryHtml(e, kind) {
     return '<li class="hs-ent"><span class="hs-rt' + (e.g === 0 ? ' nil' : '') + '">' + esc(rateTxt(e.g)) + '</span><div>' +
       '<p dir="ltr" lang="en">' + esc(e.d) + '</p>' +
@@ -190,7 +216,16 @@
   function ratePanel(c, sac) {
     if (!DATA) return '<div class="shim" style="height:60px"></div>';
     var h = '<h3 class="hs-sub">' + esc(t('hs.r.h')) + '</h3>';
-    if (sac) return h + '<p class="note">' + esc(t('hs.r.svc')) + '</p>';
+    if (sac) {
+      var sm = svcMatch(c), flat = rateMatch(c), sone = oneRate(flat);
+      if (!sm.length) h += '<p class="note">' + esc(t('hs.s.none')) + '</p>';
+      else {
+        h += sone != null ? '<p class="gt-badge ok">' + esc(t('hs.r.one', { r: rateTxt(sone) })) + '</p><p class="soft">' + esc(t('hs.r.fit')) + '</p>'
+          : '<p class="gt-badge warn">' + esc(t('hs.s.many')) + '</p>';
+        h += '<ul class="hs-ents">' + sm.map(function (e) { return svcHtml(e); }).join('') + '</ul>';
+      }
+      return h + '<p class="note">' + esc(t('hs.s.ex')) + '</p><p class="soft hs-src">' + esc(t('hs.s.src', { d: NS.fmtDate(DATA.r.checked) })) + '</p>';
+    }
     var m = rateMatch(c), one = oneRate(m);
     if (!m.length) h += '<p class="note">' + esc(t('hs.r.none')) + '</p>';
     else {
@@ -265,7 +300,7 @@
       return;
     }
     var f = findAll(q);
-    if (!f.codes.length && !f.rates.length) { out.innerHTML = '<p class="soft">' + esc(t('hs.f.none')) + '</p>' + portalBtns(''); return; }
+    if (!f.codes.length && !f.rates.length && !f.svc.length) { out.innerHTML = '<p class="soft">' + esc(t('hs.f.none')) + '</p>' + portalBtns(''); return; }
     var h = '';
     if (f.codes.length) h += '<h3 class="hs-sub">' + esc(t('hs.f.codes')) + '</h3><ul class="hs-list">' + f.codes.map(function (x) {
       var kind = x[2] ? 'hs.k.sac' : x[0].length === 2 ? 'hs.k.ch' : 'hs.k.hsn';
@@ -274,6 +309,7 @@
     if (f.rates.length) h += '<h3 class="hs-sub">' + esc(t('hs.f.rates')) + '</h3><ul class="hs-ents">' + f.rates.map(function (e) {
       return entryHtml(e, 'all').replace('<div>', '<div>' + (e.i.length ? '<button type="button" class="btn sm hs-use" data-code="' + esc(e.i[0]) + '">' + esc(e.i[0]) + '</button> ' : ''));
     }).join('') + '</ul>';
+    if (f.svc.length) h += '<h3 class="hs-sub">' + esc(t('hs.s.found')) + '</h3><ul class="hs-ents">' + f.svc.map(function (e) { return svcHtml(e, true); }).join('') + '</ul>';
     out.innerHTML = h + '<p class="soft">' + esc(t('hs.f.next2')) + '</p>';
   }
 
@@ -307,7 +343,7 @@
       return;
     }
     help.innerHTML = '<select class="hs-choose" aria-label="' + esc(t('hs.i.pick')) + '"><option value="">' + esc(t('hs.i.pick')) + '</option>' +
-      m.map(function (x) { var d = x.e.d.length > 70 ? x.e.d.slice(0, 68) + '…' : x.e.d; return '<option value="' + x.e.g + '">' + esc(rateTxt(x.e.g) + ' · ' + d) + '</option>'; }).join('') + '</select>';
+      m.filter(function (x) { return x.e.g != null; }).map(function (x) { var d = x.e.d.length > 70 ? x.e.d.slice(0, 68) + '…' : x.e.d; return '<option value="' + x.e.g + '">' + esc(rateTxt(x.e.g) + ' · ' + d) + '</option>'; }).join('') + '</select>';
     $('select', help).onchange = function () { if (this.value !== '') gst.value = this.value; };
   }
   function loadItems() {
