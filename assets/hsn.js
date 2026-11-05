@@ -182,6 +182,40 @@
   function scoreWords(ws, tw) {
     return ws.filter(function (w) { return tw.some(function (x) { return x.indexOf(w) === 0 || (w.length > 4 && x.indexOf(w.slice(0, -1)) === 0); }); }).length;
   }
+  /* everyday shop words -> the words the official list uses (each checked to find the right heading in hsn.json) */
+  var SYN = {
+    'mobile phone': 'smartphones', 'mobile': 'smartphones', 'smartphone': 'smartphones', 'phone': 'telephone sets', 'laptop': 'portable automatic data processing',
+    'computer': 'automatic data processing machines', 'fridge': 'refrigerators', 'ac': 'air conditioning machines', 'tv': 'television receivers',
+    'bike': 'motorcycles', 'scooter': 'motorcycles', 'scooty': 'motorcycles', 'car': 'motor cars', 'medicine': 'medicaments', 'charger': 'static converters',
+    'battery': 'accumulators', 'led': 'led lamps', 'led bulb': 'led lamps', 'shoes': 'footwear', 'chappal': 'footwear', 'slipper': 'footwear',
+    'atta': 'wheat meslin flour', 'maida': 'wheat flour', 'dal': 'dried leguminous', 'gur': 'jaggery', 'sariya': 'bars rods steel', 'saria': 'bars rods steel',
+    'tmt': 'bars rods steel', 'toothpaste': 'dentifrices', 'petrol': 'motor spirit', 'geyser': 'water heaters', 'mixer': 'food grinders', 'mixie': 'food grinders',
+    'notebook': 'exercise books', 'copy': 'exercise books', 'dupatta': 'shawls', 'cooler': 'air coolers', 'specs': 'spectacles', 'chashma': 'spectacles', 'pen': 'ball point pens'
+  };
+  function official(q) {
+    var s = String(q || '').toLowerCase().trim().replace(/\s+/g, ' ');
+    if (SYN[s]) return SYN[s];
+    var ws = s.split(' '), alt = ws.map(function (w) { return SYN[w] || w; }).join(' ');
+    return alt !== s ? alt : '';
+  }
+  function findBoth(q) {
+    var f = findAll(q), alt = /^[0-9\s]+$/.test(q) ? '' : official(q);
+    if (!alt) return f;
+    var a = findAll(alt), seen = {};
+    if (!a.codes.length && !a.rates.length) return f;
+    ['codes', 'rates', 'svc', 'exm'].forEach(function (k) {
+      a[k] = a[k].concat(f[k]).filter(function (x) { var id = k === 'codes' ? 'c' + x[0] : k + (x.d || '') + (x.i || ''); if (seen[id]) return false; seen[id] = 1; return true; });
+    });
+    a.codes = a.codes.slice(0, 60); a.more = Math.max(a.more, f.more); a.alt = alt;
+    return a;
+  }
+  /* GST rate shown next to a goods code in the results: one rate, or the rates the user picks from */
+  function rateChip(code) {
+    if (!/^\d{4,8}$/.test(code) || code.slice(0, 2) === '99') return '';
+    var m = rateMatch(code), one = oneRate(m), all = rates(m);
+    if (one != null) return '<em class="hs-chip">' + esc(t('hs.f.gst', { r: rateTxt(one) })) + '</em>';
+    return all.length ? '<em class="hs-chip many">' + esc(t('hs.f.gstmany', { r: all.map(rateTxt).join(' / ') })) + '</em>' : '';
+  }
   /* full search over the official list (codes) and the rate entries (words only) */
   function findAll(q) {
     var digits = q.replace(/\s/g, ''), res = { codes: [], rates: [], svc: [], exm: [], more: 0 };
@@ -339,12 +373,12 @@
       }).join('') + '</ul>' : '');
       return;
     }
-    var f = findAll(q);
+    var f = findBoth(q);
     if (!f.codes.length && !f.rates.length && !f.svc.length && !f.exm.length) { out.innerHTML = '<p class="soft">' + esc(t('hs.f.none')) + '</p>' + portalBtns(''); return; }
-    var h = '';
+    var h = f.alt ? '<p class="soft hs-alt">' + esc(t('hs.f.syn', { w: f.alt })) + '</p>' : '';
     if (f.codes.length) h += '<h3 class="hs-sub">' + esc(t('hs.f.codes')) + '</h3><ul class="hs-list">' + f.codes.map(function (x) {
       var kind = x[2] ? 'hs.k.sac' : x[0].length === 2 ? 'hs.k.ch' : 'hs.k.hsn';
-      return '<li><button type="button" class="hs-pick" data-code="' + esc(x[0]) + '"><b class="mono">' + esc(x[0]) + '</b><span dir="ltr" lang="en">' + esc(x[1]) + '</span><small>' + esc(t(kind)) + '</small></button></li>';
+      return '<li><button type="button" class="hs-pick" data-code="' + esc(x[0]) + '"><b class="mono">' + esc(x[0]) + '</b><span dir="ltr" lang="en">' + esc(x[1]) + '</span><small>' + esc(t(kind)) + rateChip(x[0]) + '</small></button></li>';
     }).join('') + '</ul>' + (f.more ? '<p class="soft">' + esc(t('hs.f.more', { n: 60 })) + '</p>' : '');
     if (f.rates.length) h += '<h3 class="hs-sub">' + esc(t('hs.f.rates')) + '</h3><ul class="hs-ents">' + f.rates.map(function (e) {
       return entryHtml(e, 'all').replace('<div>', '<div>' + (e.i.length ? '<button type="button" class="btn sm hs-use" data-code="' + esc(e.i[0]) + '">' + esc(e.i[0]) + '</button> ' : ''));
