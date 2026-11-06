@@ -221,7 +221,16 @@
     }
     if (svc && x[2]) s += 3;
     if (/^other$/i.test(String(x[1]).trim())) s -= 1;
+    /* a heading that STARTS with the word (SCREWS, BOLTS…) above one that only mentions it (…screwing…) (round C) */
+    if (x._f == null) x._f = stem(words(x[1])[0] || '');
+    if (x._f === ws[0]) s += 2;
     return s;
+  }
+  /* several words and no code has them all (pvc pipe): codes with the most of the words, best first (round C) */
+  function rankSome(ws, x, svc) {
+    var n = 0, s = 0;
+    ws.forEach(function (w) { var own = x._w.indexOf(w) >= 0 ? 3 : x._w.some(function (y) { return hit(w, y); }) ? 2 : (x._p || []).some(function (y) { return hit(w, y); }) ? 1 : 0; if (own) { n++; s += own; } });
+    return n ? n * 10 + s + (svc && x[2] ? 3 : 0) : -1;
   }
   var STOP = { of: 1, for: 1, and: 1, the: 1, in: 1, on: 1, to: 1, with: 1, by: 1, an: 1, or: 1, ka: 1, ki: 1, ke: 1 };
   var SVCQ = /(ing|ant|ancy|ency|ist|ian|services?|work|repair|rent|hire|fees?)$/;
@@ -233,7 +242,9 @@
     'battery': 'accumulators', 'led': 'led lamps', 'led bulb': 'led lamps', 'shoes': 'footwear', 'chappal': 'footwear', 'slipper': 'footwear',
     'atta': 'wheat meslin flour', 'maida': 'wheat flour', 'dal': 'dried leguminous', 'gur': 'jaggery', 'sariya': 'bars rods steel', 'saria': 'bars rods steel',
     'tmt': 'bars rods steel', 'toothpaste': 'dentifrices', 'petrol': 'motor spirit', 'geyser': 'water heaters', 'mixer': 'food grinders', 'mixie': 'food grinders',
-    'notebook': 'exercise books', 'copy': 'exercise books', 'dupatta': 'shawls', 'cooler': 'air coolers', 'specs': 'spectacles', 'chashma': 'spectacles', 'pen': 'ball point pens'
+    'notebook': 'exercise books', 'copy': 'exercise books',
+    'pvc pipe': 'tubes pipes hoses plastics', 'pipe fitting': 'tubes pipes fittings', 'hinge': 'hinges', 'kabza': 'hinges', 'kabja': 'hinges', 'ਕਬਜ਼ਾ': 'hinges', 'कब्ज़ा': 'hinges', 'कब्जा': 'hinges',
+    'ladder': 'other articles aluminium', 'ladders': 'other articles aluminium', 'seedhi': 'other articles aluminium', 'sidhi': 'other articles aluminium', 'tap': 'taps cocks valves', 'nal': 'taps cocks valves', 'dupatta': 'shawls', 'cooler': 'air coolers', 'specs': 'spectacles', 'chashma': 'spectacles', 'pen': 'ball point pens'
   };
   /* everyday words for services and trades (user test 2026-11-06): each one or more searches of the official words; the codes
      they lead to: accountant 998222 / 998221 / 998231, software 997331 / 998434, lawyer 998211-998216, and so on */
@@ -296,6 +307,11 @@
       if (keep.length && drop.length) { ws = keep; res.drop = drop; }
       var svc = raw.some(function (w) { return SVCQ.test(w); }), sc = [];
       DATA.all.forEach(function (x) { var s = rank(ws, x, svc); if (s >= 0) sc.push([s, x]); });
+      if (!sc.length && ws.length > 1) {
+        DATA.all.forEach(function (x) { var s = rankSome(ws, x, svc); if (s >= 0) sc.push([s, x]); });
+        var best = sc.reduce(function (m, p) { return Math.max(m, Math.floor(p[0] / 10)); }, 0);
+        sc = sc.filter(function (p) { return Math.floor(p[0] / 10) === best; }); res.some = true;
+      }
       res.codes = sc.sort(function (a, b) { return b[0] - a[0] || a[1][0].length - b[1][0].length || (a[1][0] < b[1][0] ? -1 : 1); }).map(function (p) { return p[1]; });
       DATA.r.entries.forEach(function (e) { if (scoreWords(ws, e._w) === ws.length) res.rates.push(e); });
       DATA.r.svc.forEach(function (e) { if (scoreWords(ws, e._w) === ws.length) res.svc.push(e); });
