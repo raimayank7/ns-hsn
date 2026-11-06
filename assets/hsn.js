@@ -110,6 +110,18 @@
   NS.hsnCheck = check;
 
   function words(s) { return String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(function (w) { return w.length > 1; }); }
+  /* search words (user test 2026-11-06): a light English stem, so crate = crates, accountant = accounting = accounts,
+     consultancy = consulting; the same stem is used for the list and the search, so both sides always agree */
+  function stem(w) {
+    if (w.length > 5 && /ies$/.test(w)) w = w.slice(0, -3) + 'y';
+    else if (w.length > 4 && /(ss|x|ch|sh)es$/.test(w)) w = w.slice(0, -2);
+    else if (w.length > 3 && /s$/.test(w) && !/(ss|us|is)$/.test(w)) w = w.slice(0, -1);
+    if (w.length > 7 && /(ancy|ency)$/.test(w)) return w.slice(0, -4);
+    if (w.length > 7 && /(ant|ent)$/.test(w)) return w.slice(0, -3);
+    if (w.length > 6 && /ing$/.test(w)) return w.slice(0, -3);
+    return w;
+  }
+  function stems(s) { return words(s).map(stem); }
 
   /* official data, loaded once when first needed */
   var DATA = null, dataP = null;
@@ -121,16 +133,14 @@
         var h = a[0], r = a[1], desc = {};
         h.goods.forEach(function (x) { desc[x[0]] = x[1]; });
         h.sac.forEach(function (x) { desc[x[0]] = x[1]; });
-        r.entries.forEach(function (e) { e._w = words(e.d); });
-        (r.svc || []).forEach(function (e) { e._w = words(e.d + ' ' + e.h); });
-        (r.exm || []).forEach(function (e) { e._w = words(e.d + ' ' + e.h + ' ' + (e.c || '')); });
+        prep(h, r);
         /* the terms paragraph 2 defines, to show the meaning of those used in an entry */
         r._terms = Object.keys(r.exmDefs || {}).map(function (k) {
           var m = /^\([a-z]+\)\s?[“‘"']([^”’"']+)[”’"']/.exec(r.exmDefs[k]);
           return m ? { k: k, re: new RegExp('\\b' + m[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i') } : null;
         }).filter(Boolean);
         DATA = { h: h, r: r, desc: desc, all: h.goods.concat(h.sac.map(function (x) { return [x[0], x[1], 1]; })) };
-        DATA.all.forEach(function (x) { x._w = words(x[1]); });
+        index(DATA);
         return DATA;
       });
       dataP.catch(function () { dataP = null; });
@@ -138,6 +148,23 @@
     return dataP;
   }
   NS.hsnData = loadData;
+  function prep(h, r) {
+    r.entries.forEach(function (e) { e._w = stems(e.d); });
+    (r.svc || []).forEach(function (e) { e._w = stems(e.d + ' ' + e.h); });
+    (r.exm || []).forEach(function (e) { e._w = stems(e.d + ' ' + e.h + ' ' + (e.c || '')); });
+  }
+  /* every code's own words (_w) and the words of the headings above it (_p): a sub-heading such as 392310 "Boxes, cases, crates"
+     leaves "of plastics" to its heading 3923, so "plastic crate" must look there too. _v = every word of the list. */
+  function index(D) {
+    D.voc = {};
+    D.all.forEach(function (x) {
+      x._w = stems(x[1]); x._w.forEach(function (w) { D.voc[w] = 1; });
+      var c = x[0], up = [];
+      if (c.length > 4) up.push(D.desc[c.slice(0, 4)]);
+      if (c.length > 6) up.push(D.desc[c.slice(0, 6)]);
+      x._p = stems(up.filter(Boolean).join(' '));
+    });
+  }
 
   /* rate entries for a goods code: kind 'all' = the entry covers the whole code, 'part' = only some codes under it */
   function rateMatch(code) {
@@ -179,11 +206,27 @@
   function rates(m) { var s = []; m.forEach(function (x) { if (x.e.g != null && s.indexOf(x.e.g) < 0) s.push(x.e.g); }); return s.sort(function (a, b) { return a - b; }); }
   NS.hsnRate = function (code) { var m = rateMatch(String(code || '').replace(/\D/g, '')); return { one: oneRate(m), all: rates(m), entries: m }; };
 
+  function hit(w, x) { return x === w || w.length > 2 && x.indexOf(w) === 0; }
   function scoreWords(ws, tw) {
-    return ws.filter(function (w) { return tw.some(function (x) { return x.indexOf(w) === 0 || (w.length > 4 && x.indexOf(w.slice(0, -1)) === 0); }); }).length;
+    return ws.filter(function (w) { return tw.some(function (x) { return hit(w, x); }); }).length;
   }
+  /* rank of a code for the search words, or -1 when a word is missing: a whole word in its own text 3, the start of a word 2,
+     only in a heading above it 1; services first when the search sounds like a service (accounting, consultant, repairs...) */
+  function rank(ws, x, svc) {
+    var s = 0;
+    for (var i = 0; i < ws.length; i++) {
+      var w = ws[i], own = x._w.indexOf(w) >= 0 ? 3 : x._w.some(function (y) { return hit(w, y); }) ? 2 : (x._p || []).some(function (y) { return hit(w, y); }) ? 1 : 0;
+      if (!own) return -1;
+      s += own;
+    }
+    if (svc && x[2]) s += 3;
+    if (/^other$/i.test(String(x[1]).trim())) s -= 1;
+    return s;
+  }
+  var STOP = { of: 1, for: 1, and: 1, the: 1, in: 1, on: 1, to: 1, with: 1, by: 1, an: 1, or: 1, ka: 1, ki: 1, ke: 1 };
+  var SVCQ = /(ing|ant|ancy|ency|ist|ian|services?|work|repair|rent|hire|fees?)$/;
   /* everyday shop words -> the words the official list uses (each checked to find the right heading in hsn.json) */
-  var SYN = {
+  var SYN0 = {
     'mobile phone': 'smartphones', 'mobile': 'smartphones', 'smartphone': 'smartphones', 'phone': 'telephone sets', 'laptop': 'portable automatic data processing',
     'computer': 'automatic data processing machines', 'fridge': 'refrigerators', 'ac': 'air conditioning machines', 'tv': 'television receivers',
     'bike': 'motorcycles', 'scooter': 'motorcycles', 'scooty': 'motorcycles', 'car': 'motor cars', 'medicine': 'medicaments', 'charger': 'static converters',
@@ -192,21 +235,44 @@
     'tmt': 'bars rods steel', 'toothpaste': 'dentifrices', 'petrol': 'motor spirit', 'geyser': 'water heaters', 'mixer': 'food grinders', 'mixie': 'food grinders',
     'notebook': 'exercise books', 'copy': 'exercise books', 'dupatta': 'shawls', 'cooler': 'air coolers', 'specs': 'spectacles', 'chashma': 'spectacles', 'pen': 'ball point pens'
   };
+  /* everyday words for services and trades (user test 2026-11-06): each one or more searches of the official words; the codes
+     they lead to: accountant 998222 / 998221 / 998231, software 997331 / 998434, lawyer 998211-998216, and so on */
+  var SYN1 = {
+    'chartered accountant': ['accounting bookkeeping', 'financial auditing', 'tax consulting'], 'ca': ['accounting bookkeeping', 'financial auditing', 'tax consulting'],
+    'accountant': ['accounting bookkeeping'], 'accounting': ['accounting bookkeeping'], 'bookkeeping': ['accounting bookkeeping'], 'audit': ['financial auditing'], 'auditor': ['financial auditing'],
+    'gst return': ['tax consulting preparation'], 'itr': ['tax consulting preparation'], 'tax consultant': ['tax consulting preparation'],
+    'software': ['computer software', 'software downloads'], 'tally software': ['computer software'], 'tally': ['computer software'], 'app development': ['software development'],
+    'lawyer': ['legal advisory'], 'advocate': ['legal advisory'], 'vakil': ['legal advisory'], 'tuition': ['education'], 'coaching': ['training coaching'],
+    'salon': ['hairdressing barbers', 'beauty treatment'], 'parlour': ['beauty treatment'], 'barber': ['hairdressing barbers'], 'transport': ['goods transport'], 'truck': ['goods transport'],
+    'freight': ['goods transport'], 'courier': ['courier'], 'tent house': ['rental'], 'caterer': ['catering'], 'photographer': ['photography'], 'architect': ['architectural'],
+    'guard': ['security'], 'housekeeping': ['cleaning'], 'cctv': ['security systems'], 'plastic crate': ['crates plastics'], 'crate': ['crates']
+  };
+  /* alternative searches: [] when none */
   function official(q) {
-    var s = String(q || '').toLowerCase().trim().replace(/\s+/g, ' ');
-    if (SYN[s]) return SYN[s];
-    var ws = s.split(' '), alt = ws.map(function (w) { return SYN[w] || w; }).join(' ');
-    return alt !== s ? alt : '';
+    var s = String(q || '').toLowerCase().trim().replace(/\s+/g, ' '), out = [];
+    if (SYN1[s]) out = out.concat(SYN1[s]);
+    if (SYN0[s]) out.push(SYN0[s]);
+    var ws = s.split(' ');
+    if (!out.length && ws.length > 1) {
+      var alt = ws.map(function (w) { return SYN0[w] || w; }).join(' '); if (alt !== s) out.push(alt);
+      ws.forEach(function (w) { if (SYN1[w]) out = out.concat(SYN1[w]); });
+    }
+    return out.filter(function (a, i) { return a !== s && out.indexOf(a) === i; });
   }
   function findBoth(q) {
-    var f = findAll(q), alt = /^[0-9\s]+$/.test(q) ? '' : official(q);
-    if (!alt) return f;
-    var a = findAll(alt), seen = {};
-    if (!a.codes.length && !a.rates.length) return f;
-    ['codes', 'rates', 'svc', 'exm'].forEach(function (k) {
-      a[k] = a[k].concat(f[k]).filter(function (x) { var id = k === 'codes' ? 'c' + x[0] : k + (x.d || '') + (x.i || ''); if (seen[id]) return false; seen[id] = 1; return true; });
+    var f = findAll(q), alts = /^[0-9\s]+$/.test(q) ? [] : official(q);
+    if (!alts.length) return f;
+    var seen = {}, a = { codes: [], rates: [], svc: [], exm: [], more: f.more, drop: SYN1[String(q).toLowerCase().trim().replace(/\s+/g, ' ')] ? null : f.drop }, used = [];
+    alts.forEach(function (alt) {
+      var r = findAll(alt); if (!r.codes.length && !r.rates.length && !r.svc.length) return;
+      used.push(alt);
+      ['codes', 'rates', 'svc', 'exm'].forEach(function (k) { a[k] = a[k].concat(r[k]); });
     });
-    a.codes = a.codes.slice(0, 60); a.more = Math.max(a.more, f.more); a.alt = alt;
+    if (!used.length) return f;
+    ['codes', 'rates', 'svc', 'exm'].forEach(function (k) {
+      a[k] = a[k].concat(f[k]).filter(function (x) { var id = k === 'codes' ? 'c' + x[0] : k + (x.d || '') + (x.i || '') + (x.id || ''); if (seen[id]) return false; seen[id] = 1; return true; });
+    });
+    a.codes = a.codes.slice(0, 60); a.alt = used.join(' · ');
     return a;
   }
   /* GST rate shown next to a goods code in the results: one rate, or the rates the user picks from */
@@ -223,10 +289,14 @@
       DATA.all.forEach(function (x) { if (x[0].indexOf(digits) === 0) res.codes.push(x); });
       res.codes.sort(function (a, b) { return a[0].length - b[0].length || (a[0] < b[0] ? -1 : 1); });
     } else {
-      var ws = words(q); if (!ws.length) return res;
-      var sc = [];
-      DATA.all.forEach(function (x) { var s = scoreWords(ws, x._w); if (s === ws.length) sc.push([s, x]); });
-      res.codes = sc.map(function (p) { return p[1]; }).sort(function (a, b) { return a[0].length - b[0].length || (a[0] < b[0] ? -1 : 1); });
+      var raw = words(q).filter(function (w, i, a) { return !STOP[w] || a.every(function (y) { return STOP[y]; }); }), ws = raw.map(stem); if (!ws.length) return res;
+      /* a word the list never uses (a brand such as Tally) is left out, and said so */
+      var voc = Object.keys(DATA.voc), keep = [], drop = [];
+      ws.forEach(function (w, i) { if (DATA.voc[w] || voc.some(function (v) { return hit(w, v); })) keep.push(w); else drop.push(raw[i]); });
+      if (keep.length && drop.length) { ws = keep; res.drop = drop; }
+      var svc = raw.some(function (w) { return SVCQ.test(w); }), sc = [];
+      DATA.all.forEach(function (x) { var s = rank(ws, x, svc); if (s >= 0) sc.push([s, x]); });
+      res.codes = sc.sort(function (a, b) { return b[0] - a[0] || a[1][0].length - b[1][0].length || (a[1][0] < b[1][0] ? -1 : 1); }).map(function (p) { return p[1]; });
       DATA.r.entries.forEach(function (e) { if (scoreWords(ws, e._w) === ws.length) res.rates.push(e); });
       DATA.r.svc.forEach(function (e) { if (scoreWords(ws, e._w) === ws.length) res.svc.push(e); });
       (DATA.r.exm || []).forEach(function (e) { if (scoreWords(ws, e._w) === ws.length) res.exm.push(e); });
@@ -375,7 +445,7 @@
     }
     var f = findBoth(q);
     if (!f.codes.length && !f.rates.length && !f.svc.length && !f.exm.length) { out.innerHTML = '<p class="soft">' + esc(t('hs.f.none')) + '</p>' + portalBtns(''); return; }
-    var h = f.alt ? '<p class="soft hs-alt">' + esc(t('hs.f.syn', { w: f.alt })) + '</p>' : '';
+    var h = (f.alt ? '<p class="soft hs-alt">' + esc(t('hs.f.syn', { w: f.alt })) + '</p>' : '') + (f.drop && f.drop.length ? '<p class="soft hs-alt">' + esc(NS.t('fx.hs_drop', { w: f.drop.join(', ') })) + '</p>' : '');
     if (f.codes.length) h += '<h3 class="hs-sub">' + esc(t('hs.f.codes')) + '</h3><ul class="hs-list">' + f.codes.map(function (x) {
       var kind = x[2] ? 'hs.k.sac' : x[0].length === 2 ? 'hs.k.ch' : 'hs.k.hsn';
       return '<li><button type="button" class="hs-pick" data-code="' + esc(x[0]) + '"><b class="mono">' + esc(x[0]) + '</b><span dir="ltr" lang="en">' + esc(x[1]) + '</span><small>' + esc(t(kind)) + rateChip(x[0]) + '</small></button></li>';
@@ -486,6 +556,8 @@
       function () { var o = $('[data-hs-out]', root); if (o) o.insertAdjacentHTML('beforeend', '<p class="soft">' + esc(t('hs.d.err')) + '</p>'); });
   }
 
+  if (window.NS_HSN_TEST) window.NS_HSN_TEST({ use: function (h, r) { var desc = {}; h.goods.forEach(function (x) { desc[x[0]] = x[1]; }); h.sac.forEach(function (x) { desc[x[0]] = x[1]; }); prep(h, r);
+    DATA = { h: h, r: r, desc: desc, all: h.goods.concat(h.sac.map(function (x) { return [x[0], x[1], 1]; })) }; index(DATA); }, find: findBoth, stem: stem });
   function start() { root = $('#hsn-tool'); if (root) render(); }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();
   document.addEventListener('ns-lang', function () { if (root) render(); });
